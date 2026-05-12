@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import time
 import uuid
 from pathlib import Path
 from typing import override
@@ -15,7 +14,7 @@ from kimi_cli.utils.logging import logger
 
 class Params(BaseModel):
     cron: str = Field(description="A valid 5-field cron expression in local time.")
-    prompt: str = Field(description="The prompt to run when the schedule fires.")
+    prompt: str = Field(min_length=1, description="The prompt to run when the schedule fires.")
     recurring: bool = Field(
         default=False,
         description="If true, the task will reschedule after each fire. If false, it runs once.",
@@ -105,7 +104,7 @@ class CreateCronTask(CallableTool2[Params]):
 
         # Create task
         task_id = uuid.uuid4().hex[:8]
-        now_ms = int(__import__("time").time() * 1000)
+        now_ms = int(time.time() * 1000)
         task = LoopTask(
             id=task_id,
             cron=params.cron,

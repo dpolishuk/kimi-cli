@@ -89,8 +89,28 @@ class LoopStore:
         if self._durable_path is None:
             return
 
-        durable_tasks = [t for t in self._tasks.values() if t.durable]
-        payload: dict[str, Any] = {"tasks": [t.model_dump(mode="json") for t in durable_tasks]}
+        # Merge with on-disk state so parallel sessions don't clobber each other
+        merged: dict[str, LoopTask] = {}
+        if self._durable_path.exists():
+            try:
+                data = json.loads(self._durable_path.read_text(encoding="utf-8"))
+                for item in data.get("tasks", []):
+                    try:
+                        t = LoopTask.model_validate(item)
+                        merged[t.id] = t
+                    except Exception:
+                        pass
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                pass
+
+        # Apply current in-memory state
+        for task in self._tasks.values():
+            if task.durable:
+                merged[task.id] = task
+            else:
+                merged.pop(task.id, None)
+
+        payload: dict[str, Any] = {"tasks": [t.model_dump(mode="json") for t in merged.values()]}
         atomic_json_write(payload, self._durable_path)
 
     # ------------------------------------------------------------------

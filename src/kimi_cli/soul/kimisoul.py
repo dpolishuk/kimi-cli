@@ -837,9 +837,9 @@ class KimiSoul:
         # 1. TURN INITIALIZATION
         # ═══════════════════════════════════════════════════════════════════════
 
-        # Discard any stale steers from a previous turn.
-        while not self._steer_queue.empty():
-            self._steer_queue.get_nowait()
+        # Consume any pending steers from between turns (e.g. loop scheduler)
+        # instead of discarding them — they represent legitimate follow-up work.
+        await self._consume_pending_steers()
 
         # ── 1a. MCP deferred loading ──────────────────────────────────────────
         if isinstance(self._agent.toolset, KimiToolset):

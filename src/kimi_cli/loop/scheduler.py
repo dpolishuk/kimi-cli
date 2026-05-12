@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,22 +107,42 @@ class _LoopLock:
         self._owned = False
 
     def acquire(self) -> bool:
-        """Try to acquire the lock. Returns True if we now own it."""
+        """Try to acquire the lock atomically. Returns True if we now own it."""
+        if self._owned:
+            return True
         try:
-            if self._lock_path.exists():
-                try:
-                    pid = int(self._lock_path.read_text(encoding="utf-8").strip())
-                except (ValueError, OSError):
-                    pid = None
-
-                if pid is not None and pid != os.getpid() and self._pid_alive(pid):
-                    return False
-                # stale lock
-
-            self._lock_path.write_text(str(os.getpid()), encoding="utf-8")
+            # Atomic create — fails if file already exists
+            fd = os.open(self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
             self._owned = True
             return True
+        except FileExistsError:
+            # Lock exists — check if it's stale
+            try:
+                pid = int(self._lock_path.read_text(encoding="utf-8").strip())
+            except (ValueError, OSError):
+                pid = None
+
+            if pid is not None and pid != os.getpid() and self._pid_alive(pid):
+                return False
+
+            # Stale lock — try to remove and re-acquire once
+            with contextlib.suppress(OSError):
+                self._lock_path.unlink()
+            return self._acquire_once()
         except OSError:
+            return False
+
+    def _acquire_once(self) -> bool:
+        """Non-rec helper for the single retry after clearing a stale lock."""
+        try:
+            fd = os.open(self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+            self._owned = True
+            return True
+        except (OSError, FileExistsError):
             return False
 
     def release(self) -> None:
@@ -137,13 +159,20 @@ class _LoopLock:
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
-        try:
-            if hasattr(os, "kill"):
-                os.kill(pid, 0)
+        if sys.platform == "win32":
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x0400, False, pid)  # PROCESS_QUERY_INFORMATION
+            if handle:
+                kernel32.CloseHandle(handle)
                 return True
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
         except (OSError, ProcessLookupError):
-            pass
-        return False
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +219,19 @@ class LoopScheduler:
         self._stopped = False
         # Load durable tasks if we acquire the lock
         self._maybe_load_durable()
-        self._task = asyncio.create_task(self._poll_loop())
+        # Surface missed one-shot tasks so the user can confirm before they run
+        missed = self.check_missed_tasks()
+        if missed:
+            for task in missed:
+                logger.warning(
+                    "Missed loop task: id={id} cron={cron} prompt={prompt!r} — "
+                    "it will fire on next tick",
+                    id=task.id,
+                    cron=task.cron,
+                    prompt=task.prompt,
+                )
+        with contextlib.suppress(RuntimeError):
+            self._task = asyncio.create_task(self._poll_loop())
         logger.info("Loop scheduler started")
 
     def stop(self) -> None:
@@ -265,11 +306,14 @@ class LoopScheduler:
         # Acquire or refresh lock for durable tasks
         self._maybe_acquire_lock()
 
-        # Evict aged recurring tasks
-        aged = self._store.evict_aged(self._config.jitter.recurring_max_age_ms, now_ms)
-        for task in aged:
-            self._task_states.pop(task.id, None)
-            logger.info("Loop task aged out and removed: id={id}", id=task.id)
+        # Identify aged recurring tasks — they fire one final time, then are removed
+        aged_ids = {
+            t.id
+            for t in self._store.list_all()
+            if t.recurring
+            and not t.permanent
+            and now_ms - t.created_at >= self._config.jitter.recurring_max_age_ms
+        }
 
         # Process tasks
         fired: list[LoopTask] = []
@@ -285,9 +329,16 @@ class LoopScheduler:
             fired.append(state.task)
 
         for task in fired:
-            await self._fire_task(task)
+            await self._fire_task(task, is_final_fire=task.id in aged_ids)
 
-    async def _fire_task(self, task: LoopTask) -> None:
+        # Remove any aged tasks that were not fired (e.g., not yet due or in_flight)
+        for task_id in aged_ids:
+            if self._store.get(task_id) is not None:
+                self._store.remove(task_id)
+                self._task_states.pop(task_id, None)
+                logger.info("Loop task aged out and removed: id={id}", id=task_id)
+
+    async def _fire_task(self, task: LoopTask, is_final_fire: bool = False) -> None:
         logger.info("Loop task firing: id={id} prompt={prompt!r}", id=task.id, prompt=task.prompt)
 
         if task.agent_id is not None and self._soul is not None:
@@ -301,7 +352,7 @@ class LoopScheduler:
         now_ms = int(time.time() * 1000)
         task.last_fired_at = now_ms
 
-        if task.recurring:
+        if task.recurring and not is_final_fire:
             # Reschedule forward from now
             next_fire = _compute_next_fire_at(task, now_ms, self._config.jitter)
             state = self._task_states.get(task.id)
@@ -321,10 +372,13 @@ class LoopScheduler:
                         next=next_fire,
                     )
         else:
-            # One-shot: remove after fire
+            # One-shot or final fire of aged recurring task: remove after fire
             self._store.remove(task.id)
             self._task_states.pop(task.id, None)
-            logger.info("Loop task completed (one-shot): id={id}", id=task.id)
+            if is_final_fire:
+                logger.info("Loop task aged out after final fire: id={id}", id=task.id)
+            else:
+                logger.info("Loop task completed (one-shot): id={id}", id=task.id)
 
     # ------------------------------------------------------------------
     # Lock management

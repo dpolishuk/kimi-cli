@@ -38,7 +38,7 @@ If the interval doesn't divide evenly (e.g. `7m`), round to the nearest clean in
 If parsing yields an empty prompt (e.g. the user typed `/loop 5m` with no command), show usage help and **do not call the scheduling tool**.
 
 Usage:
-```
+```text
 /loop [interval] <prompt>
 
 Intervals: Ns, Nm, Nh, Nd

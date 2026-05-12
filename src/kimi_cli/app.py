@@ -417,7 +417,10 @@ class KimiCLI:
 
         # Stop the loop scheduler
         if self._runtime.loop_scheduler is not None:
-            self._runtime.loop_scheduler.stop()
+            try:
+                self._runtime.loop_scheduler.stop()
+            except Exception:
+                logger.warning("Error stopping loop scheduler; continuing exit", exc_info=True)
 
         bg_config = self._runtime.config.background
         if bg_config.keep_alive_on_exit:
