@@ -97,7 +97,8 @@ class LoopStore:
         if self._durable_path.exists():
             try:
                 data = json.loads(self._durable_path.read_text(encoding="utf-8"))
-                for item in data.get("tasks", []):
+                raw_tasks = data.get("tasks", []) if isinstance(data, dict) else []
+                for item in raw_tasks:
                     try:
                         t = LoopTask.model_validate(item)
                         merged[t.id] = t

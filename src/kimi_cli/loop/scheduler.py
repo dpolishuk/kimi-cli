@@ -220,22 +220,9 @@ class LoopScheduler:
             return
 
         self._stopped = False
-        # Load durable tasks if we acquire the lock
+        # Load durable tasks if we acquire the lock (missed-task cleanup
+        # happens inside _maybe_load_durable so it runs after tasks are visible).
         self._maybe_load_durable()
-        # Surface missed one-shot tasks and remove them so they don't auto-fire
-        # without user confirmation (re-creating them is the safe default).
-        missed = self.check_missed_tasks()
-        if missed:
-            for task in missed:
-                logger.warning(
-                    "Missed one-shot loop task removed to prevent accidental execution: "
-                    "id={id} cron={cron} prompt={prompt!r}",
-                    id=task.id,
-                    cron=task.cron,
-                    prompt=task.prompt,
-                )
-                self._store.remove(task.id)
-                self._task_states.pop(task.id, None)
         with contextlib.suppress(RuntimeError):
             self._task = asyncio.create_task(self._poll_loop())
         logger.info("Loop scheduler started")
@@ -331,18 +318,15 @@ class LoopScheduler:
             if now_ms < state.next_fire_at:
                 continue
 
+            # Skip durable tasks if we don't own the lock (another session may fire them)
+            if state.task.durable and not self._lock_owned:
+                continue
+
             state.in_flight = True
             fired.append(state.task)
 
         for task in fired:
             await self._fire_task(task, is_final_fire=task.id in aged_ids)
-
-        # Remove any aged tasks that were not fired (e.g., not yet due or in_flight)
-        for task_id in aged_ids:
-            if self._store.get(task_id) is not None:
-                self._store.remove(task_id)
-                self._task_states.pop(task_id, None)
-                logger.info("Loop task aged out and removed: id={id}", id=task_id)
 
     async def _fire_task(self, task: LoopTask, is_final_fire: bool = False) -> None:
         logger.info("Loop task firing: id={id} prompt={prompt!r}", id=task.id, prompt=task.prompt)
@@ -353,7 +337,15 @@ class LoopScheduler:
 
         # Inject prompt into the soul's message queue
         if self._soul is not None:
-            self._soul.steer(task.prompt)
+            try:
+                self._soul.steer(task.prompt)
+            except Exception:
+                logger.exception("Loop task steer failed: id={id}", id=task.id)
+                # Clear in_flight so the task can be retried on next tick
+                state = self._task_states.get(task.id)
+                if state is not None:
+                    state.in_flight = False
+                return
 
         now_ms = int(time.time() * 1000)
         task.last_fired_at = now_ms
@@ -414,6 +406,20 @@ class LoopScheduler:
                 next_fire = _compute_next_fire_at(task, from_ms, self._config.jitter)
                 if next_fire is not None:
                     self._task_states[task.id] = _TaskState(task=task, next_fire_at=next_fire)
+        # Remove missed one-shot durable tasks so they don't auto-fire without
+        # user confirmation (re-creating them is the safe default).
+        missed = self.check_missed_tasks()
+        if missed:
+            for task in missed:
+                logger.warning(
+                    "Missed one-shot loop task removed to prevent accidental execution: "
+                    "id={id} cron={cron} prompt={prompt!r}",
+                    id=task.id,
+                    cron=task.cron,
+                    prompt=task.prompt,
+                )
+                self._store.remove(task.id)
+                self._task_states.pop(task.id, None)
 
     # ------------------------------------------------------------------
     # Missed task handling
