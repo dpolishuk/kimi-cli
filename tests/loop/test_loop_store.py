@@ -105,6 +105,30 @@ class TestLoopStore:
         assert len(evicted) == 0
         assert store.get("perm0001") is not None
 
+    def test_load_durable_does_not_clobber_in_memory_task(self, tmp_path: Path) -> None:
+        # Simulate: task exists on disk, then an in-memory update happens,
+        # then load_durable is called — the in-memory version must be preserved.
+        store = LoopStore(session_dir=tmp_path)
+        task = LoopTask(
+            id="a3f7b2d1",
+            cron="*/5 * * * *",
+            prompt="original",
+            created_at=1_000_000,
+            recurring=True,
+            durable=True,
+        )
+        store.add(task)
+
+        # Create a second store pointing at the same disk file,
+        # add an in-memory task with the same ID but different prompt,
+        # then load durable — in-memory task should win.
+        store2 = LoopStore(session_dir=tmp_path)
+        updated_task = task.model_copy(update={"prompt": "updated in-memory"})
+        store2._tasks[task.id] = updated_task
+        store2.load_durable()
+
+        assert store2.get(task.id).prompt == "updated in-memory"
+
     def test_evict_aged_skips_non_recurring(self, store: LoopStore) -> None:
         one_shot = LoopTask(
             id="once0001",
