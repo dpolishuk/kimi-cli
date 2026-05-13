@@ -85,7 +85,8 @@ class TestComputeNextFireAt:
         from_ms = 3_595_000
         result = _compute_next_fire_at(task, from_ms, cfg)
         assert result is not None
-        assert result >= from_ms
+        # Early lead would push result to 3_510_000..3_520_000, so clamp must kick in
+        assert result == from_ms
 
 
 class TestLoopScheduler:

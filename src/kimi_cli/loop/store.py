@@ -80,7 +80,8 @@ class LoopStore:
                 )
 
         for task in tasks:
-            self._tasks[task.id] = task
+            # Don't clobber in-memory tasks added before durable reload
+            self._tasks.setdefault(task.id, task)
 
         logger.info("Loaded {count} durable loop task(s)", count=len(tasks))
         return tasks
