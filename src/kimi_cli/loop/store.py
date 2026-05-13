@@ -13,10 +13,12 @@ from kimi_cli.utils.logging import logger
 class LoopStore:
     """In-memory and file-backed storage for loop tasks."""
 
-    def __init__(self, session_dir: Path | None = None) -> None:
+    def __init__(self, session_dir: Path | None = None, durable_dir: Path | None = None) -> None:
         self._tasks: dict[str, LoopTask] = {}
         self._session_dir = session_dir
-        self._durable_path = session_dir / "scheduled.json" if session_dir else None
+        # Durable tasks live at workspace level so they survive session changes
+        _durable_base = durable_dir or session_dir
+        self._durable_path = _durable_base / "scheduled.json" if _durable_base else None
 
     # ------------------------------------------------------------------
     # Core operations

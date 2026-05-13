@@ -214,6 +214,7 @@ class Runtime:
 
             self.loop_scheduler = LoopScheduler(
                 session_dir=self.session.dir,
+                durable_dir=self.session.work_dir_meta.sessions_dir,
                 config=self.config.loop,
             )
 

@@ -186,15 +186,18 @@ class LoopScheduler:
     def __init__(
         self,
         session_dir: Path | None = None,
+        durable_dir: Path | None = None,
         config: LoopConfig | None = None,
     ) -> None:
-        self._store = LoopStore(session_dir)
+        self._store = LoopStore(session_dir=session_dir, durable_dir=durable_dir)
         self._config = config or LoopConfig()
         self._task_states: dict[str, _TaskState] = {}
         self._soul: KimiSoul | None = None
         self._task: asyncio.Task[None] | None = None
         self._stopped = True
-        self._lock = _LoopLock(session_dir / ".loop.lock") if session_dir else None
+        # Lock and durable storage both live at workspace level
+        _lock_base = durable_dir or session_dir
+        self._lock = _LoopLock(_lock_base / ".loop.lock") if _lock_base else None
         self._lock_owned = False
         self._last_lock_probe = 0.0
         self._lock_probe_interval_s = 5.0
@@ -219,17 +222,20 @@ class LoopScheduler:
         self._stopped = False
         # Load durable tasks if we acquire the lock
         self._maybe_load_durable()
-        # Surface missed one-shot tasks so the user can confirm before they run
+        # Surface missed one-shot tasks and remove them so they don't auto-fire
+        # without user confirmation (re-creating them is the safe default).
         missed = self.check_missed_tasks()
         if missed:
             for task in missed:
                 logger.warning(
-                    "Missed loop task: id={id} cron={cron} prompt={prompt!r} — "
-                    "it will fire on next tick",
+                    "Missed one-shot loop task removed to prevent accidental execution: "
+                    "id={id} cron={cron} prompt={prompt!r}",
                     id=task.id,
                     cron=task.cron,
                     prompt=task.prompt,
                 )
+                self._store.remove(task.id)
+                self._task_states.pop(task.id, None)
         with contextlib.suppress(RuntimeError):
             self._task = asyncio.create_task(self._poll_loop())
         logger.info("Loop scheduler started")
