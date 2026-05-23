@@ -215,6 +215,17 @@ class KimiSoul:
         # Bind plan mode state to tools that support it
         self._bind_plan_mode_tools()
 
+        # Bind and start loop scheduler (root only).
+        # Guard against rebinding to a temporary helper soul (e.g. /init)
+        # so the live shell soul keeps receiving scheduled prompts.
+        if (
+            self.is_root
+            and self._runtime.loop_scheduler is not None
+            and self._runtime.loop_scheduler._soul is None
+        ):
+            self._runtime.loop_scheduler.bind_soul(self)
+            self._runtime.loop_scheduler.start()
+
         self._slash_commands = self._build_slash_commands()
         self._slash_command_map = self._index_slash_commands(self._slash_commands)
 
@@ -832,9 +843,9 @@ class KimiSoul:
         # 1. TURN INITIALIZATION
         # ═══════════════════════════════════════════════════════════════════════
 
-        # Discard any stale steers from a previous turn.
-        while not self._steer_queue.empty():
-            self._steer_queue.get_nowait()
+        # Consume any pending steers from between turns (e.g. loop scheduler)
+        # instead of discarding them — they represent legitimate follow-up work.
+        await self._consume_pending_steers()
 
         # ── 1a. MCP deferred loading ──────────────────────────────────────────
         if isinstance(self._agent.toolset, KimiToolset):
