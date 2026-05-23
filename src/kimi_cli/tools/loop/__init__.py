@@ -55,6 +55,12 @@ class CreateCronTask(CallableTool2[Params]):
         if scheduler is None:
             return builder.error("Loop scheduler is not available.", brief="No scheduler")
 
+        if not self._runtime.config.loop.enabled:
+            return builder.error(
+                "Loop scheduling is disabled in the configuration.",
+                brief="Scheduling disabled",
+            )
+
         # Validate cron more thoroughly using croniter
         try:
             from croniter import croniter  # type: ignore[import-untyped]
